@@ -32,10 +32,16 @@ def train_test_split(*arrays, test_size=0.25, random_state=None, stratify=None,
         test_idx, train_idx = idx[:n_test], idx[n_test:]
     else:
         stratify = np.asarray(stratify)
+        classes, counts = np.unique(stratify, return_counts=True)
+        # each class's share of the test set: floor first, then hand the leftover
+        # places to the classes with the largest fractional parts, so the total is exactly n_test
+        exact = counts * n_test / n
+        share = np.floor(exact).astype(int)
+        leftover = n_test - share.sum()
+        share[np.argsort(-(exact - share), kind="stable")[:leftover]] += 1
         test_idx = []
-        for cls in np.unique(stratify):
+        for cls, k in zip(classes, share):
             cls_idx = rng.permutation(np.where(stratify == cls)[0])
-            k = int(round(len(cls_idx) * n_test / n))  # this class's share of the test set
             test_idx.extend(cls_idx[:k])
         test_idx = np.array(sorted(test_idx))
         train_idx = np.setdiff1d(np.arange(n), test_idx)
@@ -115,13 +121,20 @@ def cross_val_score(model, X, y, cv=5, scoring="accuracy"):
     """
     Fit a fresh copy of `model` on each training fold and score it on the test fold.
 
+    cv: an int k -> StratifiedKFold(k) for classifiers, KFold(k) for regressors
+        (same rule as scikit-learn: plain KFold on class-sorted data would give
+        folds that contain only one class). Or pass any splitter object.
     scoring: 'accuracy', 'f1', 'balanced_accuracy', 'r2', 'roc_auc'
              or any function f(y_true, y_pred).
     Returns an array with one score per fold.
+
+    Note: fit any preprocessing (e.g. StandardScaler) INSIDE each fold — scaling
+    all of X first leaks information from the test folds into training.
     """
+    from .models import _Classifier
     X, y = np.asarray(X, float), np.asarray(y)
     if isinstance(cv, int):
-        cv = KFold(cv)
+        cv = StratifiedKFold(cv) if isinstance(model, _Classifier) else KFold(cv)
     score_fns = {
         "accuracy": metrics.accuracy_score,
         "f1": metrics.f1_score,

@@ -40,6 +40,31 @@ class TestResult:
                 + ("reject H0" if self.pvalue < alpha else "fail to reject H0"))
 
 
+def _sample(x, name="sample", min_n=2):
+    """Convert to a float array and refuse samples that are too small to test."""
+    x = np.asarray(x, float).ravel()
+    if len(x) < min_n:
+        raise ValueError(f"{name} needs at least {min_n} values (got {len(x)})")
+    return x
+
+
+def _paired(a, b, min_n=2):
+    a, b = _sample(a, "first sample", min_n), _sample(b, "second sample", min_n)
+    if len(a) != len(b):
+        raise ValueError(f"paired samples must have the same length (got {len(a)} and {len(b)})")
+    return a, b
+
+
+def _groups(groups):
+    groups = [np.asarray(g, float).ravel() for g in groups]
+    if len(groups) < 2:
+        raise ValueError("need at least 2 groups")
+    for i, g in enumerate(groups):
+        if len(g) == 0:
+            raise ValueError(f"group {i + 1} is empty")
+    return groups
+
+
 def _p_from_t(t, df, alternative):
     """Turn a t statistic into a p-value for the chosen alternative hypothesis."""
     if alternative == "two-sided":
@@ -109,7 +134,7 @@ def ttest_1samp(x, popmean, alternative="two-sided"):
     One-sample t-test.  H0: population mean = popmean
         t = (mean - popmean) / (s / sqrt(n)),   df = n - 1
     """
-    x = np.asarray(x, float)
+    x = _sample(x)
     n, m, s = len(x), x.mean(), x.std(ddof=1)
     se = s / np.sqrt(n)
     t = (m - popmean) / se
@@ -129,7 +154,7 @@ def ttest_ind(a, b, equal_var=True, alternative="two-sided"):
         df = SE^4 / [ (s1^2/n1)^2/(n1-1) + (s2^2/n2)^2/(n2-1) ]   (Welch–Satterthwaite)
     t = (mean_a - mean_b) / SE
     """
-    a, b = np.asarray(a, float), np.asarray(b, float)
+    a, b = _sample(a, "first sample"), _sample(b, "second sample")
     n1, n2 = len(a), len(b)
     v1, v2 = a.var(ddof=1), b.var(ddof=1)
     if equal_var:
@@ -152,8 +177,8 @@ def ttest_rel(a, b, alternative="two-sided"):
     Paired t-test = one-sample t-test on the differences d = a - b against 0.
     Use when the same subjects are measured twice (before / after).
     """
-    d = np.asarray(a, float) - np.asarray(b, float)
-    r = ttest_1samp(d, 0.0, alternative)
+    a, b = _paired(a, b)
+    r = ttest_1samp(a - b, 0.0, alternative)
     r.name = "Paired t-test"
     r.details["mean_diff"] = r.details.pop("mean")
     return r
@@ -161,7 +186,7 @@ def ttest_rel(a, b, alternative="two-sided"):
 
 def ztest(x, popmean, sigma, alternative="two-sided"):
     """One-sample z-test when the population SD sigma is KNOWN:  z = (mean - mu0) / (sigma/sqrt(n))."""
-    x = np.asarray(x, float)
+    x = _sample(x, min_n=1)
     z = (x.mean() - popmean) / (sigma / np.sqrt(len(x)))
     return TestResult("One-sample z-test", float(z), _p_from_z(z, alternative))
 
@@ -199,8 +224,10 @@ def f_oneway(*groups):
     F = (SS_between / df_b) / (SS_within / df_w) = MS_between / MS_within
     Large F -> group means differ more than noise would explain.
     """
-    groups = [np.asarray(g, float) for g in groups]
+    groups = _groups(groups)
     k, N = len(groups), sum(len(g) for g in groups)
+    if N <= k:
+        raise ValueError("ANOVA needs more values than groups")
     grand = np.concatenate(groups).mean()
     ss_b = sum(len(g) * (g.mean() - grand) ** 2 for g in groups)
     ss_w = sum(np.sum((g - g.mean()) ** 2) for g in groups)
@@ -218,7 +245,7 @@ def tukey_hsd(*groups):
         q = |mean_i - mean_j| / sqrt( MS_within/2 * (1/n_i + 1/n_j) )
     p-value from the studentized range distribution with k groups, N-k df.
     """
-    groups = [np.asarray(g, float) for g in groups]
+    groups = _groups(groups)
     anova = f_oneway(*groups)
     msw, dfw, k = anova.details["MS_within"], anova.df[1], len(groups)
     out = []
@@ -240,8 +267,13 @@ def chisquare(observed, expected=None):
         χ² = Σ (O - E)^2 / E,      df = k - 1
     expected=None -> all categories equally likely.
     """
-    O = np.asarray(observed, float)
+    O = _sample(observed, "observed counts")
     E = np.full_like(O, O.sum() / len(O)) if expected is None else np.asarray(expected, float)
+    if len(E) != len(O):
+        raise ValueError(f"expected has {len(E)} counts but observed has {len(O)}")
+    if not np.isclose(E.sum(), O.sum()):
+        raise ValueError(f"expected counts sum to {E.sum():g} but observed sum to {O.sum():g}; "
+                         "they must be equal (rescale proportions to counts)")
     chi2 = np.sum((O - E) ** 2 / E)
     df = len(O) - 1
     return TestResult("Chi-square goodness of fit", float(chi2), float(_dist.chi2.sf(chi2, df)), df,
@@ -258,6 +290,10 @@ def chi2_contingency(table, correction=True):
            Σ (|O - E| - 0.5)^2 / E
     """
     O = np.asarray(table, float)
+    if O.ndim != 2 or min(O.shape) < 2:
+        raise ValueError("a contingency table needs at least 2 rows and 2 columns")
+    if (O.sum(0) == 0).any() or (O.sum(1) == 0).any():
+        raise ValueError("a row or column of the table is all zeros (expected count would be 0)")
     E = O.sum(1, keepdims=True) * O.sum(0, keepdims=True) / O.sum()
     df = (O.shape[0] - 1) * (O.shape[1] - 1)
     diff = np.abs(O - E)
@@ -283,7 +319,7 @@ def fisher_exact(table):
     probs = _dist.hypergeom.pmf(support, n, r1, c1)
     p_obs = _dist.hypergeom.pmf(a, n, r1, c1)
     p = probs[probs <= p_obs * (1 + 1e-7)].sum()
-    odds = (a * d) / (b * c) if b * c else np.inf
+    odds = (a * d) / (b * c) if b * c else (np.inf if a * d else np.nan)  # 0/0 -> nan
     return TestResult("Fisher's exact test", float(odds), float(min(p, 1.0)),
                       details={"odds_ratio": odds})
 
@@ -304,7 +340,7 @@ def mannwhitneyu(x, y, alternative="two-sided", use_continuity=True):
          sd_U   = sqrt( n1 n2 / 12 * ( (N+1) - Σ(t^3 - t) / (N(N-1)) ) )   (tie-corrected)
          z = (U1 - mean_U ∓ 0.5) / sd_U
     """
-    x, y = np.asarray(x, float), np.asarray(y, float)
+    x, y = _sample(x, "first sample", 1), _sample(y, "second sample", 1)
     n1, n2 = len(x), len(y)
     N = n1 + n2
     ranks = rankdata(np.concatenate([x, y]))
@@ -340,9 +376,11 @@ def wilcoxon(x, y=None, alternative="two-sided", use_continuity=False):
                               var  = n(n+1)(2n+1)/24 - Σ(t^3 - t)/48
     Statistic reported: min(W+, W-) for two-sided, like scipy.
     """
-    d = np.asarray(x, float) - (0 if y is None else np.asarray(y, float))
+    d = _sample(x, min_n=1) if y is None else np.subtract(*_paired(x, y, 1))
     d = d[d != 0]
     n = len(d)
+    if n == 0:
+        raise ValueError("all differences are zero — nothing to test")
     r = rankdata(np.abs(d))
     w_plus, w_minus = r[d > 0].sum(), r[d < 0].sum()
     _, t = np.unique(r, return_counts=True)
@@ -372,7 +410,7 @@ def kruskal(*groups):
         tie correction: H / (1 - Σ(t^3 - t) / (N^3 - N))
         df = k - 1, compared to χ²
     """
-    groups = [np.asarray(g, float) for g in groups]
+    groups = _groups(groups)
     allx = np.concatenate(groups)
     N = len(allx)
     r = rankdata(allx)
@@ -411,7 +449,7 @@ def pearsonr(x, y):
     Pearson correlation  r = cov(x, y) / (sd_x sd_y)
     Test of H0: rho = 0 uses  t = r sqrt((n-2) / (1-r^2)),  df = n - 2
     """
-    x, y = np.asarray(x, float), np.asarray(y, float)
+    x, y = _paired(x, y, 3)
     xc, yc = x - x.mean(), y - y.mean()
     r = np.sum(xc * yc) / np.sqrt(np.sum(xc ** 2) * np.sum(yc ** 2))
     r = float(np.clip(r, -1, 1))
@@ -432,7 +470,7 @@ def spearmanr(x, y):
 # ===========================================================================
 def ci_mean(x, confidence=0.95):
     """mean ± t_{α/2, n-1} * s / sqrt(n)"""
-    x = np.asarray(x, float)
+    x = _sample(x)
     n, m, se = len(x), x.mean(), x.std(ddof=1) / np.sqrt(len(x))
     tcrit = _dist.t.ppf(1 - (1 - confidence) / 2, n - 1)
     return (float(m - tcrit * se), float(m + tcrit * se))
@@ -452,6 +490,8 @@ def ci_proportion(successes, n, confidence=0.95, method="wilson"):
       'wald'   : p̂ ± z sqrt(p̂(1-p̂)/n)               (simple, poor for small n or p near 0/1)
       'wilson' : (p̂ + z²/2n ± z sqrt(p̂(1-p̂)/n + z²/4n²)) / (1 + z²/n)   (recommended)
     """
+    if n <= 0 or not 0 <= successes <= n:
+        raise ValueError(f"need 0 <= successes <= n (got {successes} of {n})")
     p = successes / n
     z = _dist.norm.ppf(1 - (1 - confidence) / 2)
     if method == "wald":
@@ -470,7 +510,7 @@ def cohens_d(a, b):
     d = (mean_a - mean_b) / pooled SD
     Rough guide: 0.2 small, 0.5 medium, 0.8 large.
     """
-    a, b = np.asarray(a, float), np.asarray(b, float)
+    a, b = _sample(a, "first sample"), _sample(b, "second sample")
     n1, n2 = len(a), len(b)
     sp = np.sqrt(((n1 - 1) * a.var(ddof=1) + (n2 - 1) * b.var(ddof=1)) / (n1 + n2 - 2))
     return float((a.mean() - b.mean()) / sp)
@@ -523,13 +563,26 @@ def power_ttest_ind(effect_size, n_per_group, alpha=0.05, alternative="two-sided
 
 
 def sample_size_ttest_ind(effect_size, power=0.8, alpha=0.05):
-    """Smallest n per group reaching the requested power (search upward from n=2)."""
-    n = 2
-    while power_ttest_ind(effect_size, n, alpha) < power:
-        n += 1
-        if n > 1_000_000:
+    """
+    Smallest n per group reaching the requested power.
+    Power grows with n, so: double n until it is enough, then bisect between
+    the last too-small n and the first big-enough n (~2 log2(n) power evaluations
+    instead of n).
+    """
+    if effect_size <= 0:
+        raise ValueError("effect size must be positive")
+    lo, hi = 1, 2                       # power(lo) < target is assumed, hi is the candidate
+    while power_ttest_ind(effect_size, hi, alpha) < power:
+        lo, hi = hi, hi * 2
+        if hi > 100_000_000:
             raise ValueError("effect size too small")
-    return n
+    while hi - lo > 1:                  # invariant: power(lo) < target <= power(hi)
+        mid = (lo + hi) // 2
+        if power_ttest_ind(effect_size, mid, alpha) >= power:
+            hi = mid
+        else:
+            lo = mid
+    return hi
 
 
 # ===========================================================================

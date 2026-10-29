@@ -51,6 +51,14 @@ def _safe_div(a, b):
     return a / b if b else 0.0
 
 
+def _check_pos_label(y_true, y_pred, pos_label):
+    """With labels like 'yes'/'no', the default pos_label=1 would silently score 0."""
+    labels = np.unique(np.concatenate([np.asarray(y_true), np.asarray(y_pred)]))
+    if len(labels) >= 2 and pos_label not in labels:
+        raise ValueError(f"pos_label={pos_label!r} is not one of the labels {labels.tolist()}; "
+                         f"pass pos_label=... or use average='macro'.")
+
+
 # ---------------------------------------------------------------------------
 # Basic scores
 # ---------------------------------------------------------------------------
@@ -71,6 +79,7 @@ def _per_class(y_true, y_pred, func, average, pos_label):
     """
     labels = np.unique(np.concatenate([np.asarray(y_true), np.asarray(y_pred)]))
     if average == "binary":
+        _check_pos_label(y_true, y_pred, pos_label)
         return func(*_binary_counts(y_true, y_pred, pos_label))
     counts = [_binary_counts(y_true, y_pred, lab) for lab in labels]
     if average == "micro":
@@ -112,6 +121,7 @@ def specificity_score(y_true, y_pred, pos_label=1):
     Specificity (TNR) = TN / (TN + FP)
     Example: 2 / (2 + 1) = 0.667
     """
+    _check_pos_label(y_true, y_pred, pos_label)
     tp, fp, fn, tn = _binary_counts(y_true, y_pred, pos_label)
     return _safe_div(tn, tn + fp)
 
@@ -136,8 +146,13 @@ def f1_score(y_true, y_pred, average="binary", pos_label=1):
 
 
 def balanced_accuracy_score(y_true, y_pred):
-    """Mean recall over classes — robust to class imbalance."""
-    return recall_score(y_true, y_pred, average="macro")
+    """
+    Mean recall over the classes that occur in y_true — robust to class imbalance.
+    (A class that appears only in y_pred has no recall, so it is left out, as in scikit-learn.)
+    """
+    y_true = np.asarray(y_true)
+    return float(np.mean([np.mean(np.asarray(y_pred)[y_true == c] == c)
+                          for c in np.unique(y_true)]))
 
 
 def matthews_corrcoef(y_true, y_pred, pos_label=1):
@@ -145,6 +160,7 @@ def matthews_corrcoef(y_true, y_pred, pos_label=1):
     MCC = (TP*TN - FP*FN) / sqrt((TP+FP)(TP+FN)(TN+FP)(TN+FN))
     Ranges -1 .. +1; 0 = no better than chance. Good for imbalanced data.
     """
+    _check_pos_label(y_true, y_pred, pos_label)
     tp, fp, fn, tn = _binary_counts(y_true, y_pred, pos_label)
     den = np.sqrt(float((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn)))
     return _safe_div(tp * tn - fp * fn, den)
@@ -187,6 +203,8 @@ def roc_curve(y_true, y_score, pos_label=1):
     Returns fpr, tpr, thresholds (starting at (0, 0) with threshold +inf).
     """
     y_true = np.asarray(y_true) == pos_label
+    if y_true.all() or not y_true.any():
+        raise ValueError("ROC needs both positive and negative samples in y_true")
     y_score = np.asarray(y_score, dtype=float)
     order = np.argsort(-y_score, kind="mergesort")
     y_sorted, s_sorted = y_true[order], y_score[order]
@@ -272,8 +290,11 @@ def r2_score(y_true, y_pred):
     R^2 = 1 - SS_res / SS_tot
     SS_res = sum (y - y_hat)^2   (error left after the model)
     SS_tot = sum (y - mean y)^2  (error of always predicting the mean)
+    If y is constant, SS_tot = 0: return 1.0 for a perfect fit, else 0.0 (as scikit-learn).
     """
     y = np.asarray(y_true, float)
     ss_res = np.sum((y - np.asarray(y_pred, float)) ** 2)
     ss_tot = np.sum((y - y.mean()) ** 2)
+    if ss_tot == 0:
+        return 1.0 if ss_res == 0 else 0.0
     return float(1 - ss_res / ss_tot)

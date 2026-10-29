@@ -48,8 +48,18 @@ def _target_counts(y, sampling_strategy, kind):
         if len(classes) != 2:
             raise ValueError("a float sampling_strategy only works for binary problems")
         if kind == "over":   # raise minority to r * n_majority
-            return {mino: int(sampling_strategy * count[maj]) - count[mino]}
-        return {maj: int(count[mino] / sampling_strategy)}  # lower majority
+            n_add = int(sampling_strategy * count[maj]) - count[mino]
+            if n_add < 0:
+                raise ValueError(
+                    f"sampling_strategy={sampling_strategy} is below the current ratio "
+                    f"{count[mino] / count[maj]:.3f}; over-sampling cannot remove samples.")
+            return {mino: n_add}
+        n_keep = int(count[mino] / sampling_strategy)  # lower majority
+        if n_keep > count[maj]:
+            raise ValueError(
+                f"sampling_strategy={sampling_strategy} is below the current ratio "
+                f"{count[mino] / count[maj]:.3f}; under-sampling cannot add samples.")
+        return {maj: n_keep}
 
     s = sampling_strategy
     if s == "auto":
@@ -81,8 +91,10 @@ class RandomOverSampler(_BaseSampler):
     until the target counts are reached.
 
     shrinkage=None -> exact copies.
-    shrinkage=h    -> "smoothed bootstrap": add Gaussian noise with std h * feature std
-                      (this is what imblearn's ROSE-like option does).
+    shrinkage=h    -> "smoothed bootstrap": add Gaussian noise with
+                      std = h * c * (feature std within the class),
+                      c = (4 / ((d + 2) n)) ^ (1 / (d + 4))   (Silverman's rule;
+                      d = features, n = all samples — same as imblearn's ROSE option).
     """
 
     def __init__(self, sampling_strategy="auto", shrinkage=None, random_state=None):
@@ -97,9 +109,9 @@ class RandomOverSampler(_BaseSampler):
             idx = rng.choice(np.where(y == cls)[0], size=n_add, replace=True)
             Xc = X[idx].copy()
             if self.shrinkage is not None:
-                std = X[y == cls].std(0, ddof=1)
-                n_c, d = (y == cls).sum(), X.shape[1]
-                bw = (4 / ((d + 2) * n_c)) ** (1 / (d + 4))  # Silverman's rule of thumb
+                std = X[y == cls].std(0)
+                n, d = X.shape
+                bw = (4 / ((d + 2) * n)) ** (1 / (d + 4))  # Silverman's rule of thumb
                 Xc += rng.standard_normal(Xc.shape) * self.shrinkage * bw * std
             X_new.append(Xc)
             y_new.append(np.full(n_add, cls))
@@ -163,6 +175,9 @@ class BorderlineSMOTE(_BaseSampler):
          kind='borderline-2': neighbours from any class; if the neighbour is from
                               another class, u is drawn in [0, 0.5] so the new
                               point stays closer to the minority sample.
+                              (This follows the original paper; imblearn's
+                              borderline-2 splits the work differently, so the
+                              synthetic points differ even though counts match.)
     """
 
     def __init__(self, sampling_strategy="auto", k_neighbors=5, m_neighbors=10,
@@ -301,7 +316,9 @@ class EditedNearestNeighbours(_BaseSampler):
 
     For every sample of the classes being cleaned, look at its k nearest neighbours:
       kind_sel='all'  -> remove it if ANY neighbour has a different class
-      kind_sel='mode' -> remove it if the MAJORITY of neighbours disagree
+      kind_sel='mode' -> remove it unless its own class is the most common label
+                         among the neighbours (a tie goes to the smallest label,
+                         like scipy.stats.mode — same as imblearn)
     Removes noisy and borderline points of the larger classes.
     """
 
@@ -314,10 +331,11 @@ class EditedNearestNeighbours(_BaseSampler):
         agree = y[nn] == y[:, None]
         if self.kind_sel == "all":
             ok = agree.all(1)
-        else:  # mode: own class must be the most common among neighbours
-            ok = np.array([
-                np.sum(agree[i]) >= max(np.sum(y[nn[i]] == c) for c in np.unique(y[nn[i]]))
-                for i in range(len(y))])
+        else:  # mode: own class must be THE most common label (ties -> smallest label)
+            def mode(labels):
+                values, counts = np.unique(labels, return_counts=True)  # values sorted
+                return values[np.argmax(counts)]                        # first max = smallest
+            ok = np.array([mode(y[nn[i]]) == y[i] for i in range(len(y))])
         keep = ok | ~np.isin(y, list(targets))
         self.sample_indices_ = np.where(keep)[0]
         return X[keep], y[keep]
@@ -379,7 +397,9 @@ def kmeans(X, k, n_init=5, max_iter=300, random_state=None):
         C = [X[rng.integers(len(X))]]
         for _ in range(1, k):
             d2 = np.min(pairwise_distances(X, np.array(C)) ** 2, axis=1)
-            C.append(X[rng.choice(len(X), p=d2 / d2.sum())])
+            # all points identical to existing centres (duplicates) -> pick uniformly
+            p = d2 / d2.sum() if d2.sum() > 0 else None
+            C.append(X[rng.choice(len(X), p=p)])
         C = np.array(C)
         for _ in range(max_iter):
             labels = np.argmin(pairwise_distances(X, C), axis=1)
