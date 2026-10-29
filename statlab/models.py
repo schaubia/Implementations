@@ -98,16 +98,19 @@ class LinearRegression(_Regressor):
     Ordinary least squares.
 
     Minimise  sum (y - Xw - b)^2.
-    Add a column of ones to X for the intercept, then solve
-        X^T X w = X^T y      (normal equations)
-    We use np.linalg.lstsq, which solves the same thing more stably.
+    1. centre X and y (subtract their means) — this removes the intercept
+    2. solve  Xc^T Xc w = Xc^T yc   (normal equations)
+       We use np.linalg.lstsq, which solves the same thing more stably.
+    3. intercept  b = mean(y) - mean(X) . w
+    (Centring, as scikit-learn does, also gives a constant column a weight of 0.)
     """
 
     def fit(self, X, y):
         X, y = check_X_y(X, y)
-        Xb = np.c_[np.ones(len(X)), X]
-        beta, *_ = np.linalg.lstsq(Xb, y.astype(float), rcond=None)
-        self.intercept_, self.coef_ = beta[0], beta[1:]
+        y = y.astype(float)
+        x_mean, y_mean = X.mean(0), y.mean()
+        self.coef_, *_ = np.linalg.lstsq(X - x_mean, y - y_mean, rcond=None)
+        self.intercept_ = y_mean - x_mean @ self.coef_
         return self
 
     def predict(self, X):
