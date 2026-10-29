@@ -73,9 +73,9 @@ with right:
     new = np.array([tuple(r) not in orig for r in np.round(Xr, 10)])
     removed = np.array([tuple(r) not in res for r in np.round(X, 10)])
     scatter_classes(ax, Xr[~new], yr[~new])
-    if new.any():
-        ax.scatter(Xr[new, 0], Xr[new, 1], s=26, marker="^", color="#29a36a",
-                   edgecolor="black", linewidth=0.3, label=f"synthetic (n={new.sum()})")
+    if new.any():  # ▲ = synthetic, coloured by its class (ClusterCentroids makes class-0 points)
+        scatter_classes(ax, Xr[new], yr[new], s=30, marker="^", label_prefix="synthetic ",
+                        edge="black")
     if removed.any():
         ax.scatter(X[removed, 0], X[removed, 1], s=30, marker="x", color="gray",
                    label=f"removed (n={removed.sum()})")
@@ -87,8 +87,13 @@ st.subheader("Does it help a classifier?")
 st.caption("Logistic regression trained on the original vs. resampled TRAINING set, evaluated "
            "on the same untouched test set. Resample only the training data — never the test set.")
 Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.3, stratify=y, random_state=seed)
+try:  # the training subset can fail where the full data did not (e.g. ADASYN)
+    train_sets = {"original": (Xtr, ytr), name: sampler.fit_resample(Xtr, ytr)}
+except Exception as e:
+    st.warning(f"Could not resample the training split: {e}")
+    st.stop()
 rows = []
-for label, (A, b) in {"original": (Xtr, ytr), name: sampler.fit_resample(Xtr, ytr)}.items():
+for label, (A, b) in train_sets.items():
     sc = StandardScaler().fit(A)
     m = LogisticRegression(lr=0.5, n_iter=1500).fit(sc.transform(A), b)
     p = m.predict(sc.transform(Xte))

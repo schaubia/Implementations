@@ -3,7 +3,7 @@ import streamlit as st
 
 from app_common import fig_ax, show_source, explain, COLORS
 from statlab import metrics as M, validation as V, datasets
-from statlab.models import LogisticRegression, StandardScaler, DecisionTreeClassifier
+from statlab.models import LogisticRegression, DecisionTreeClassifier
 
 st.set_page_config(page_title="Metrics · StatLab", page_icon="📏", layout="wide")
 st.title("📏 Metrics & validation")
@@ -85,10 +85,11 @@ with tab3:
     st.pyplot(fig)
     st.write("Minority samples per test fold:",
              [int(y[t].sum()) for _, t in cv.split(X, y)])
-    sc = StandardScaler().fit(X)
+    # No scaler here on purpose: fitting StandardScaler on all of X before CV would let
+    # the test folds leak into training. (These features are already on a similar scale.)
     for label, model in {"Logistic regression": LogisticRegression(lr=0.5, n_iter=800),
                          "Decision tree (depth 3)": DecisionTreeClassifier(max_depth=3)}.items():
-        s = V.cross_val_score(model, sc.transform(X), y, cv=cv, scoring="balanced_accuracy")
+        s = V.cross_val_score(model, X, y, cv=cv, scoring="balanced_accuracy")
         st.write(f"**{label}** balanced accuracy per fold: {np.round(s, 3)} → "
                  f"mean {s.mean():.3f} ± {s.std():.3f}")
     show_source(V.KFold)
