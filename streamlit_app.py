@@ -13,24 +13,21 @@ st.markdown(
     "distributions like t, χ² and F)."
 )
 
-c1, c2 = st.columns(2)
-with c1:
-    st.subheader("🧠 Classic ML models")
-    st.markdown("Perceptron · Linear & Ridge regression · Logistic regression · k-NN · "
-                "Gaussian Naive Bayes · Decision tree (CART) · StandardScaler · PCA")
-    st.subheader("⚖️ Imbalanced learning")
-    st.markdown("RandomOverSampler · SMOTE · Borderline-SMOTE · ADASYN · RandomUnderSampler · "
-                "Tomek links · Edited Nearest Neighbours · NearMiss 1/2/3 · ClusterCentroids · "
-                "SMOTETomek · SMOTEENN")
-with c2:
-    st.subheader("🧪 Statistical tests & terms")
-    st.markdown("t-tests (one-sample, Student, Welch, paired) · z-tests · ANOVA + Tukey HSD · "
-                "χ² (goodness of fit, independence) · Fisher exact · Mann-Whitney U · Wilcoxon · "
-                "Kruskal-Wallis · KS · correlations · confidence intervals · effect sizes · "
-                "power & sample size · multiple-testing corrections")
-    st.subheader("📏 Metrics & validation")
-    st.markdown("Confusion matrix · precision / recall / F1 / MCC · ROC & PR curves · AUC · "
-                "train/test split · KFold · StratifiedKFold · cross-validation · bootstrap")
+SECTIONS = [
+    ("pages/1_🧠_Models.py", "🧠", "Models",
+     "Train a model on toy data and watch its decision boundary — from the perceptron to decision trees."),
+    ("pages/2_⚖️_Imbalanced_learning.py", "⚖️", "Imbalanced learning",
+     "See SMOTE & co. add or remove points, and whether it actually helps a classifier."),
+    ("pages/3_🧪_Statistical_tests.py", "🧪", "Statistical tests",
+     "Paste your own numbers and get the test, the p-value and every intermediate step."),
+    ("pages/4_📏_Metrics_and_validation.py", "📏", "Metrics & validation",
+     "Play with a confusion matrix, ROC curves, cross-validation folds and the bootstrap."),
+]
+cols = st.columns(2)
+for i, (page, icon, title, blurb) in enumerate(SECTIONS):
+    with cols[i % 2].container(border=True):
+        st.page_link(page, label=f"**{title}**", icon=icon)
+        st.caption(blurb)
 
 st.divider()
 st.markdown("**Use the code without the app** — copy the `statlab/` folder next to your script:")
