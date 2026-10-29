@@ -238,3 +238,96 @@ def test_under_counts():
     assert np.bincount(a).tolist() == [min(np.bincount(y))] * 2
     _, a = I.ClusterCentroids(random_state=0).fit_resample(X, y)
     assert np.bincount(a).tolist() == [min(np.bincount(y))] * 2
+
+
+# ---------------------------------------------------------------- regressions from the bug review
+def test_linear_regression_constant_column():
+    X = np.c_[rng.normal(size=50), np.ones(50)]
+    m = ML.LinearRegression().fit(X, 3 * X[:, 0] + 1)
+    assert np.allclose(m.coef_, [3, 0]) and np.isclose(m.intercept_, 1)
+
+
+def test_enn_mode_ties_match_imblearn():
+    X, y = make_classification(600, 4, n_informative=3, n_redundant=0, n_classes=3,
+                               weights=[0.7, 0.2, 0.1], random_state=1)
+    for k in (2, 3, 4, 6):
+        _, a = I.EditedNearestNeighbours(n_neighbors=k, kind_sel="mode").fit_resample(X, y)
+        _, b = us.EditedNearestNeighbours(n_neighbors=k, kind_sel="mode").fit_resample(X, y)
+        assert np.array_equal(np.bincount(a), np.bincount(b)), k
+
+
+def test_ratio_below_current_raises():
+    X, y = _data()
+    for s in (I.SMOTE(sampling_strategy=0.05), I.RandomUnderSampler(sampling_strategy=0.05)):
+        with pytest.raises(ValueError):
+            s.fit_resample(X, y)
+
+
+def test_shrinkage_matches_imblearn_scale():
+    X, y = _data()
+    a = I.RandomOverSampler(shrinkage=1.0, random_state=0).fit_resample(X, y)[0][len(X):]
+    b = os_.RandomOverSampler(shrinkage=1.0, random_state=0).fit_resample(X, y)[0][len(X):]
+    assert np.allclose(a.std(0), b.std(0), rtol=0.1)
+
+
+def test_cluster_centroids_with_duplicates():
+    X = np.r_[np.zeros((20, 2)), np.ones((5, 2))]
+    y = np.r_[np.zeros(20, int), np.ones(5, int)]
+    _, yr = I.ClusterCentroids(random_state=0).fit_resample(X, y)
+    assert np.bincount(yr).tolist() == [5, 5]
+
+
+def test_balanced_accuracy_class_only_in_pred():
+    y, p = [0, 0, 1, 1, 0], [0, 2, 1, 1, 2]
+    assert np.isclose(M.balanced_accuracy_score(y, p), skm.balanced_accuracy_score(y, p))
+
+
+def test_metric_guards():
+    with pytest.raises(ValueError):
+        M.f1_score(["a", "b", "a"], ["a", "b", "b"])          # pos_label=1 not a label
+    assert np.isclose(M.f1_score(["a", "b", "a"], ["a", "b", "b"], pos_label="a"), 2 / 3)
+    with pytest.raises(ValueError):
+        M.roc_auc_score([1, 1, 1], [0.2, 0.5, 0.9])          # one class only
+    assert M.r2_score([2, 2, 2], [2, 2, 2]) == 1.0
+
+
+def test_cross_val_default_is_stratified_for_classifiers():
+    X = np.r_[rng.normal(-1, 1, (100, 2)), rng.normal(1, 1, (100, 2))]
+    y = np.r_[np.zeros(100, int), np.ones(100, int)]          # sorted by class
+    s = V.cross_val_score(ML.LogisticRegression(), X, y, cv=5, scoring="roc_auc")
+    assert len(s) == 5 and np.all(np.isfinite(s))            # every fold has both classes
+
+
+def test_stratified_split_exact_size():
+    from sklearn.model_selection import train_test_split as sk_split
+    for n, ts, w in [(23, .3, .26), (100, .25, .1), (10, .5, .3), (57, .2, .05)]:
+        y = np.r_[np.zeros(int(n * (1 - w))), np.ones(n - int(n * (1 - w)))]
+        ours = V.train_test_split(np.zeros((n, 1)), y, test_size=ts, stratify=y, random_state=0)
+        ref = sk_split(np.zeros((n, 1)), y, test_size=ts, stratify=y, random_state=0)
+        assert len(ours[3]) == len(ref[3]) and ours[3].sum() == ref[3].sum()
+
+
+def test_stats_input_errors():
+    with pytest.raises(ValueError):
+        S.ttest_rel([1, 2, 3], [1, 2])
+    with pytest.raises(ValueError):
+        S.ttest_1samp([5.0], 1)
+    with pytest.raises(ValueError):
+        S.f_oneway([1, 2], [])
+    with pytest.raises(ValueError):
+        S.chisquare([10, 20], [10, 10, 10])
+    with pytest.raises(ValueError):
+        S.ci_proportion(30, 20)
+    with pytest.raises(ValueError):
+        S.wilcoxon([1, 2, 3], [1, 2, 3])
+    assert np.isnan(S.fisher_exact([[0, 5], [0, 7]]).statistic)
+
+
+def test_sample_size_fast_and_correct():
+    import time
+    t = time.time()
+    for d, expected in [(0.2, 394), (0.5, 64), (0.8, 26)]:
+        assert S.sample_size_ttest_ind(d) == expected
+    n = S.sample_size_ttest_ind(0.05, 0.99)
+    assert S.power_ttest_ind(0.05, n) >= 0.99 > S.power_ttest_ind(0.05, n - 1)
+    assert time.time() - t < 2
