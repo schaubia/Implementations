@@ -52,4 +52,15 @@ def explain(obj):
 def parse_numbers(text):
     """'1, 2.5 3\n4' -> np.array([1, 2.5, 3, 4])"""
     parts = text.replace(",", " ").replace(";", " ").split()
-    return np.array([float(p) for p in parts]) if parts else np.array([])
+    bad = [p for p in parts if not _is_number(p)]
+    if bad:
+        raise ValueError(f"not a number: {', '.join(repr(b) for b in bad[:3])}")
+    return np.array([float(p) for p in parts])
+
+
+def _is_number(s):
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False

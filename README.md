@@ -51,7 +51,7 @@ whatever you are looking at.
 
 ```bash
 pip install pytest scikit-learn imbalanced-learn
-python -m pytest tests -q        # 19 passed
+python -m pytest tests -q        # 30 passed
 ```
 
 - Metrics, linear/ridge, Gaussian NB, PCA, KFold, all statistical tests: match to floating-point precision.
