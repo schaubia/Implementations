@@ -9,7 +9,8 @@ Modules
 -------
 statlab.metrics      confusion matrix, precision/recall/F1, ROC-AUC, ...
 statlab.validation   train_test_split, KFold, StratifiedKFold, cross_val_score
-statlab.models       Perceptron, Linear/Logistic regression, kNN, Naive Bayes, Decision tree
+statlab.models       Perceptron, Linear/Logistic regression, kNN, Naive Bayes, Decision trees,
+                     AdaBoost, Gradient boosting
 statlab.imbalance    Random over/under sampling, SMOTE, Borderline-SMOTE, ADASYN,
                      Tomek links, Edited Nearest Neighbours, NearMiss
 statlab.stats        t-tests, chi-square, ANOVA, Mann-Whitney, CIs, effect sizes

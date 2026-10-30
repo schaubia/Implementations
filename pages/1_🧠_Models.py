@@ -10,7 +10,70 @@ st.title("🧠 Classic ML models")
 
 MODEL = st.sidebar.selectbox("Model", [
     "Perceptron", "Logistic regression", "k-nearest neighbours", "Gaussian Naive Bayes",
-    "Decision tree", "Linear / Ridge regression", "PCA"])
+    "Decision tree", "AdaBoost", "Gradient boosting", "Linear / Ridge regression",
+    "Gradient boosting (regression)", "PCA"])
+
+
+class _Staged:
+    """Wraps a boosting model so decision_regions() draws it after only m rounds."""
+
+    def __init__(self, model, m):
+        self.model, self.m, self.classes_ = model, m, model.classes_
+
+    def predict(self, X):
+        if isinstance(self.model, ML.AdaBoostClassifier):
+            return self.model.staged_predict(X, self.m)
+        return self.classes_[np.argmax(self.model.predict_proba(X, n_stages=self.m), axis=1)]
+
+
+# ------------------------------------------------------------------ gradient boosting, 1-D regression
+if MODEL == "Gradient boosting (regression)":
+    c = st.sidebar
+    n = c.slider("Points", 30, 400, 120)
+    noise = c.slider("Noise", 0.0, 1.0, 0.3)
+    n_est = c.slider("Number of trees", 1, 300, 100)
+    lr = c.slider("Learning rate", 0.01, 1.0, 0.1)
+    depth = c.slider("Tree depth", 1, 6, 2)
+    rng = np.random.default_rng(0)
+    x = np.sort(rng.uniform(0, 6, n))
+    y = np.sin(x) + 0.3 * x + rng.normal(0, noise, n)
+    X = x[:, None]
+    gb = ML.GradientBoostingRegressor(n_est, lr, depth).fit(X, y)
+    xs = np.linspace(0, 6, 400)[:, None]
+    stages_grid = [np.full(len(xs), gb.init_)] + list(gb.staged_predict(xs))
+    stages_train = [np.full(n, gb.init_)] + list(gb.staged_predict(X))
+
+    st.markdown("Each round fits a small tree to the **residuals** (what the model still gets "
+                "wrong) and adds a scaled-down copy of it to the prediction.")
+    m = st.slider("Show round m", 1, n_est, min(3, n_est))
+    before = stages_train[m - 1]
+    left, right = st.columns(2)
+    with left:
+        fig, ax = fig_ax(5.5, 4)
+        ax.scatter(x, y, s=12, color="#2a6fdb", alpha=0.6, label="data")
+        ax.plot(xs[:, 0], stages_grid[m - 1], "k--", lw=1, label=f"after {m - 1} trees")
+        ax.plot(xs[:, 0], stages_grid[m], color="#e4572e", lw=2, label=f"after {m} trees")
+        ax.legend(fontsize=8); ax.set_title("Prediction F(x)")
+        st.pyplot(fig)
+    with right:
+        fig, ax = fig_ax(5.5, 4)
+        ax.scatter(x, y - before, s=12, color="gray", alpha=0.7, label="residuals y − F")
+        ax.plot(xs[:, 0], gb.estimators_[m - 1].predict(xs), color="#29a36a", lw=2,
+                label=f"tree {m} fitted to them")
+        ax.axhline(0, color="black", lw=0.5)
+        ax.legend(fontsize=8); ax.set_title(f"Round {m}: F ← F + {lr} × tree {m}")
+        st.pyplot(fig)
+    fig, ax = fig_ax(6, 2.6)
+    ax.plot(range(1, n_est + 1), gb.train_loss_)
+    ax.axvline(m, color="#e4572e", ls="--", lw=1)
+    ax.set_xlabel("number of trees"); ax.set_ylabel("training MSE")
+    st.pyplot(fig)
+    st.caption("Try learning rate 1.0 with deep trees: it fits the noise within a few rounds. "
+               "A small rate with many trees takes smaller, safer steps.")
+    explain(ML.GradientBoostingRegressor)
+    show_source(ML.GradientBoostingRegressor)
+    show_source(ML.DecisionTreeRegressor, "The tree fitted in every round")
+    st.stop()
 
 # ------------------------------------------------------------------ regression
 if MODEL == "Linear / Ridge regression":
@@ -75,7 +138,7 @@ else:
     X, y = datasets.make_blobs(n, centers=((-2, -1), (2, -1), (0, 2.5)), std=noise)
 
 if MODEL == "Perceptron":
-    lr =c.slider("Learning rate", 0.01, 2.0, 1.0)
+    lr = c.slider("Learning rate", 0.01, 2.0, 1.0)
     epochs = c.slider("Max epochs", 1, 200, 50)
     model = ML.Perceptron(lr=lr, n_epochs=epochs)
 elif MODEL == "Logistic regression":
@@ -86,6 +149,14 @@ elif MODEL == "k-nearest neighbours":
     model = ML.KNeighborsClassifier(c.slider("k", 1, 50, 5), c.radio("Weights", ["uniform", "distance"]))
 elif MODEL == "Gaussian Naive Bayes":
     model = ML.GaussianNB()
+elif MODEL == "AdaBoost":
+    model = ML.AdaBoostClassifier(c.slider("Number of stumps", 1, 300, 50),
+                                  c.slider("Learning rate", 0.05, 2.0, 1.0),
+                                  max_depth=c.slider("Depth of each weak tree", 1, 4, 1))
+elif MODEL == "Gradient boosting":
+    model = ML.GradientBoostingClassifier(c.slider("Number of rounds", 1, 300, 100),
+                                          c.slider("Learning rate", 0.01, 1.0, 0.1),
+                                          max_depth=c.slider("Tree depth", 1, 6, 3))
 else:
     model = ML.DecisionTreeClassifier(c.radio("Criterion", ["gini", "entropy"]),
                                       max_depth=c.slider("Max depth", 1, 12, 3),
@@ -123,15 +194,57 @@ with right:
     elif MODEL == "Gaussian Naive Bayes":
         st.write("Per-class feature means:", np.round(model.theta_, 2))
         st.write("Per-class feature variances:", np.round(model.var_, 2))
+    elif MODEL in ("AdaBoost", "Gradient boosting"):
+        tr, te = model.staged_score(Xtr, ytr), model.staged_score(Xte, yte)
+        fig2, ax2 = fig_ax(5, 2.6)
+        ax2.plot(range(1, len(tr) + 1), tr, label="train")
+        ax2.plot(range(1, len(te) + 1), te, label="test")
+        ax2.set_xlabel("boosting rounds"); ax2.set_ylabel("accuracy"); ax2.legend(fontsize=8)
+        st.pyplot(fig2)
+        st.caption("Train accuracy keeps climbing; when test accuracy stops following, "
+                   "extra rounds only memorise the training data.")
 
     st.write("Confusion matrix (test):")
     st.dataframe(metrics.confusion_matrix(yte, model.predict(Xte)))
 
 cls = {"Perceptron": ML.Perceptron, "Logistic regression": ML.LogisticRegression,
        "k-nearest neighbours": ML.KNeighborsClassifier, "Gaussian Naive Bayes": ML.GaussianNB,
-       "Decision tree": ML.DecisionTreeClassifier}[MODEL]
+       "Decision tree": ML.DecisionTreeClassifier, "AdaBoost": ML.AdaBoostClassifier,
+       "Gradient boosting": ML.GradientBoostingClassifier}[MODEL]
 explain(cls)
 show_source(cls)
+if MODEL == "Gradient boosting":
+    show_source(ML.DecisionTreeRegressor, "The tree fitted in every round")
+
+if MODEL in ("AdaBoost", "Gradient boosting"):
+    st.subheader("Step through the boosting rounds")
+    n_rounds = len(model.estimators_)
+    m = st.slider("Round", 1, n_rounds, min(1, n_rounds)) if n_rounds > 1 else 1
+    if MODEL == "AdaBoost":
+        l3, r3 = st.columns(2)
+        with r3:
+            # the weak learner of round m and the weights it was trained on
+            w = model.weight_history_[m - 1]
+            fig3, ax3 = fig_ax(5.5, 4.5)
+            decision_regions(ax3, model.estimators_[m - 1], X)
+            for i, cl in enumerate(model.classes_):
+                k = ytr == cl
+                ax3.scatter(Xtr[k, 0], Xtr[k, 1], s=8 + 3000 * w[k], alpha=0.7,
+                            color=["#2a6fdb", "#e4572e", "#29a36a"][i], edgecolor="white", linewidth=0.5)
+            ax3.set_title(f"Stump {m}: error {model.estimator_errors_[m - 1]:.3f}, "
+                          f"say α = {model.estimator_weights_[m - 1]:.2f}")
+            st.pyplot(fig3)
+            st.caption("Point size = the weight this stump was trained on. "
+                       "Points the earlier stumps got wrong grow bigger.")
+        target = l3
+    else:
+        target = st.container()
+    with target:
+        fig4, ax4 = fig_ax(5.5, 4.5)
+        decision_regions(ax4, _Staged(model, m), X)
+        scatter_classes(ax4, Xtr, ytr, s=14)
+        ax4.set_title(f"Whole ensemble after {m} round{'s' if m > 1 else ''}")
+        st.pyplot(fig4)
 
 if MODEL == "Perceptron":
     st.subheader("Step through training")

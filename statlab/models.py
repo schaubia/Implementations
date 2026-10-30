@@ -13,7 +13,10 @@ LogisticRegression       — gradient descent on cross-entropy (+ optional L2)
 KNeighborsClassifier     — majority vote of k nearest points
 KNeighborsRegressor      — mean of k nearest targets
 GaussianNB               — Naive Bayes with normal likelihoods
-DecisionTreeClassifier   — CART with Gini or entropy
+DecisionTreeClassifier   — CART with Gini or entropy (optional sample weights)
+DecisionTreeRegressor    — CART with squared error
+AdaBoostClassifier       — SAMME: re-weight mistakes, weighted vote of stumps
+GradientBoostingRegressor / GradientBoostingClassifier — trees fitted to residuals
 StandardScaler, PCA      — preprocessing
 """
 import numpy as np
@@ -333,27 +336,53 @@ class GaussianNB(_Classifier):
 # Decision tree (CART)
 # ===========================================================================
 def gini(counts):
-    """Gini impurity = 1 - Σ p_k^2.   [5, 5] -> 0.5,  [10, 0] -> 0"""
-    p = counts / counts.sum()
-    return 1 - np.sum(p ** 2)
+    """
+    Gini impurity = 1 - Σ p_k^2.   [5, 5] -> 0.5,  [10, 0] -> 0
+    `counts` may also be a 2-D array: one row of class counts per candidate split.
+    """
+    counts = np.asarray(counts, float)
+    p = counts / counts.sum(-1, keepdims=True)
+    return 1 - np.sum(p ** 2, axis=-1)
 
 
 def entropy(counts):
-    """Entropy = -Σ p_k log2 p_k.     [5, 5] -> 1 bit,  [10, 0] -> 0"""
-    p = counts[counts > 0] / counts.sum()
-    return -np.sum(p * np.log2(p))
+    """
+    Entropy = -Σ p_k log2 p_k.     [5, 5] -> 1 bit,  [10, 0] -> 0   (0·log 0 counts as 0)
+    `counts` may also be a 2-D array: one row of class counts per candidate split.
+    """
+    counts = np.asarray(counts, float)
+    p = counts / counts.sum(-1, keepdims=True)
+    logp = np.log2(np.where(p > 0, p, 1.0))
+    return -np.sum(p * logp, axis=-1)
 
 
 class _Node:
-    __slots__ = ("feature", "threshold", "left", "right", "value", "impurity", "n")
+    __slots__ = ("feature", "threshold", "left", "right", "value", "impurity", "n", "leaf_id")
 
     def __init__(self, value, impurity, n):
-        self.feature = self.threshold = self.left = self.right = None
+        self.feature = self.threshold = self.left = self.right = self.leaf_id = None
         self.value, self.impurity, self.n = value, impurity, n
 
     @property
     def is_leaf(self):
         return self.left is None
+
+
+def _route(root, X):
+    """
+    Send ALL rows of X down the tree at once: at each split, one boolean mask
+    divides the rows into left and right. Yields (leaf, row indices) pairs.
+    Much faster than walking the tree separately for every row.
+    """
+    stack = [(root, np.arange(len(X)))]
+    while stack:
+        node, rows = stack.pop()
+        if node.is_leaf:
+            yield node, rows
+            continue
+        go_left = X[rows, node.feature] <= node.threshold
+        stack.append((node.left, rows[go_left]))
+        stack.append((node.right, rows[~go_left]))
 
 
 class DecisionTreeClassifier(_Classifier):
@@ -369,6 +398,9 @@ class DecisionTreeClassifier(_Classifier):
       4. Keep the split with the largest impurity decrease and recurse.
 
     A leaf stores class counts -> predict_proba = counts / total.
+
+    sample_weight (optional, used by AdaBoost): every count above becomes a SUM
+    OF WEIGHTS, so a sample with weight 3 counts like three copies of it.
     """
 
     def __init__(self, criterion="gini", max_depth=None, min_samples_split=2,
@@ -376,66 +408,74 @@ class DecisionTreeClassifier(_Classifier):
         self.criterion, self.max_depth = criterion, max_depth
         self.min_samples_split, self.min_samples_leaf = min_samples_split, min_samples_leaf
 
-    def fit(self, X, y):
+    def fit(self, X, y, sample_weight=None):
         X, y = check_X_y(X, y)
         self.classes_, y_enc = np.unique(y, return_inverse=True)
+        w = np.ones(len(y)) if sample_weight is None else np.asarray(sample_weight, float)
         self.n_features_ = X.shape[1]
         self._impurity = gini if self.criterion == "gini" else entropy
         self.feature_importances_ = np.zeros(self.n_features_)
-        self.tree_ = self._grow(X, y_enc, depth=0)
+        self.tree_ = self._grow(X, y_enc, w, depth=0)
         total = self.feature_importances_.sum()
         if total > 0:
             self.feature_importances_ /= total
         return self
 
-    def _counts(self, y):
-        return np.bincount(y, minlength=len(self.classes_)).astype(float)
+    def _counts(self, y, w):
+        return np.bincount(y, weights=w, minlength=len(self.classes_))
 
-    def _grow(self, X, y, depth):
-        counts = self._counts(y)
+    def _grow(self, X, y, w, depth):
+        counts = self._counts(y, w)
         node = _Node(counts, self._impurity(counts), len(y))
         if (node.impurity == 0 or len(y) < self.min_samples_split
                 or (self.max_depth is not None and depth >= self.max_depth)):
             return node
-        best = self._best_split(X, y, node.impurity)
+        best = self._best_split(X, y, w, node.impurity)
         if best is None:
             return node
         f, thr, gain = best
         mask = X[:, f] <= thr
         node.feature, node.threshold = f, thr
-        self.feature_importances_[f] += gain * len(y)
-        node.left = self._grow(X[mask], y[mask], depth + 1)
-        node.right = self._grow(X[~mask], y[~mask], depth + 1)
+        self.feature_importances_[f] += gain * w.sum()
+        node.left = self._grow(X[mask], y[mask], w[mask], depth + 1)
+        node.right = self._grow(X[~mask], y[~mask], w[~mask], depth + 1)
         return node
 
-    def _best_split(self, X, y, parent_impurity):
+    def _best_split(self, X, y, w, parent_impurity):
         n, K = len(y), len(self.classes_)
         best_gain, best = 1e-12, None
         for f in range(X.shape[1]):
             order = np.argsort(X[:, f], kind="stable")
-            xs, ys = X[order, f], y[order]
-            # running class counts on the left side as the threshold moves right
-            left = np.cumsum(np.eye(K)[ys], axis=0)
-            total = left[-1]
-            for i in range(self.min_samples_leaf - 1, n - self.min_samples_leaf):
-                if xs[i] == xs[i + 1]:
-                    continue  # cannot split between equal values
-                nl, nr = i + 1, n - i - 1
-                imp = (nl * self._impurity(left[i]) + nr * self._impurity(total - left[i])) / n
-                gain = parent_impurity - imp
-                if gain > best_gain:
-                    best_gain, best = gain, (f, (xs[i] + xs[i + 1]) / 2, gain)
+            xs, ys, ws = X[order, f], y[order], w[order]
+            # running (weighted) class counts on the left side as the threshold moves right
+            cum = np.cumsum(np.eye(K)[ys] * ws[:, None], axis=0)
+            total = cum[-1]
+            W = total.sum()
+            left = cum[:-1]                     # row i = left side if we cut after position i
+            right = total - left
+            wl, wr = left.sum(1), right.sum(1)
+            nl = np.arange(1, n)                # number of samples on the left
+            # valid cuts: between different values, enough samples and some weight on both sides
+            ok = ((xs[:-1] != xs[1:]) & (nl >= self.min_samples_leaf)
+                  & (n - nl >= self.min_samples_leaf) & (wl > 0) & (wr > 0))
+            if not ok.any():
+                continue
+            # evaluate every candidate threshold of this feature at once (no Python loop)
+            imp = (wl[ok] * self._impurity(left[ok]) + wr[ok] * self._impurity(right[ok])) / W
+            gain = parent_impurity - imp
+            j = np.argmax(gain)                 # first best cut for this feature
+            if gain[j] > best_gain:
+                i = np.flatnonzero(ok)[j]
+                best_gain, best = gain[j], (f, (xs[i] + xs[i + 1]) / 2, gain[j])
         return best
 
-    def _leaf(self, x):
-        node = self.tree_
-        while not node.is_leaf:
-            node = node.left if x[node.feature] <= node.threshold else node.right
-        return node
-
     def predict_proba(self, X):
+        """Send all rows down the tree together; each leaf returns counts / total."""
         X = check_X_y(X)
-        return np.array([self._leaf(x).value / self._leaf(x).n for x in X])
+        out = np.empty((len(X), len(self.classes_)))
+        for node, rows in _route(self.tree_, X):
+            out[rows] = node.value / node.value.sum()
+        return out
 
     def predict(self, X):
         return self.classes_[np.argmax(self.predict_proba(X), axis=1)]
@@ -449,7 +489,7 @@ class DecisionTreeClassifier(_Classifier):
             pad = "|   " * indent
             if node.is_leaf:
                 lines.append(f"{pad}|--- class: {self.classes_[np.argmax(node.value)]} "
-                             f"(n={node.n}, counts={node.value.astype(int).tolist()})")
+                             f"(n={node.n}, counts={np.round(node.value, 2).tolist()})")
                 return
             lines.append(f"{pad}|--- {names[node.feature]} <= {node.threshold:.3f}")
             walk(node.left, indent + 1)
@@ -458,6 +498,331 @@ class DecisionTreeClassifier(_Classifier):
 
         walk(self.tree_, 0)
         return "\n".join(lines)
+
+
+class DecisionTreeRegressor(_Regressor):
+    """
+    CART regression tree (squared error).
+
+    Same recipe as the classification tree, with numbers instead of classes:
+      - a leaf predicts the MEAN of its targets
+      - impurity of a node = SSE = Σ (y - mean)^2
+      - best split = the one with the smallest  SSE(left) + SSE(right)
+
+    Fast split search: walking the sorted values left to right we keep running
+    sums  S = Σy  and  Q = Σy²,  because  SSE = Q - S²/n  for any group.
+
+    Used by gradient boosting, which fits one of these to the residuals each round.
+    apply(X) returns the leaf each sample falls into (boosting changes leaf values).
+    """
+
+    def __init__(self, max_depth=3, min_samples_split=2, min_samples_leaf=1):
+        self.max_depth, self.min_samples_split, self.min_samples_leaf = max_depth, min_samples_split, min_samples_leaf
+
+    def fit(self, X, y):
+        X, y = check_X_y(X, y)
+        self.leaves_ = []
+        self.tree_ = self._grow(X, y.astype(float), 0)
+        return self
+
+    def _grow(self, X, y, depth):
+        sse = float(np.sum((y - y.mean()) ** 2))
+        node = _Node(float(y.mean()), sse, len(y))
+        split = None
+        if (sse > 1e-12 and len(y) >= self.min_samples_split
+                and (self.max_depth is None or depth < self.max_depth)):
+            split = self._best_split(X, y, sse)
+        if split is None:
+            node.leaf_id = len(self.leaves_)
+            self.leaves_.append(node)
+            return node
+        node.feature, node.threshold = split
+        mask = X[:, node.feature] <= node.threshold
+        node.left = self._grow(X[mask], y[mask], depth + 1)
+        node.right = self._grow(X[~mask], y[~mask], depth + 1)
+        return node
+
+    def _best_split(self, X, y, parent_sse):
+        n, m = len(y), self.min_samples_leaf
+        best_sse, best = parent_sse - 1e-12, None
+        for f in range(X.shape[1]):
+            order = np.argsort(X[:, f], kind="stable")
+            xs, ys = X[order, f], y[order]
+            S, Q = np.cumsum(ys), np.cumsum(ys ** 2)
+            nl = np.arange(1, n)                          # left size if we cut after position i
+            sse_l = Q[:-1] - S[:-1] ** 2 / nl
+            sse_r = (Q[-1] - Q[:-1]) - (S[-1] - S[:-1]) ** 2 / (n - nl)
+            total = sse_l + sse_r
+            ok = (xs[:-1] != xs[1:]) & (nl >= m) & (n - nl >= m)   # valid cut points
+            if not ok.any():
+                continue
+            i = np.flatnonzero(ok)[np.argmin(total[ok])]
+            if total[i] < best_sse:
+                best_sse, best = total[i], (f, (xs[i] + xs[i + 1]) / 2)
+        return best
+
+    def apply(self, X):
+        """Leaf id for every row."""
+        X = check_X_y(X)
+        out = np.empty(len(X), dtype=int)
+        for node, rows in _route(self.tree_, X):
+            out[rows] = node.leaf_id
+        return out
+
+    def predict(self, X):
+        values = np.array([leaf.value for leaf in self.leaves_])
+        return values[self.apply(X)]
+
+
+# ===========================================================================
+# Boosting
+# ===========================================================================
+class AdaBoostClassifier(_Classifier):
+    """
+    AdaBoost, multiclass version "SAMME" (Zhu et al., 2009) — the one scikit-learn uses.
+
+    Idea: train weak models (by default "stumps" = trees of depth 1) one after
+    another; each new one concentrates on the samples the previous ones got wrong.
+
+      1. Start with equal weights  w_i = 1/n.
+      2. For m = 1..M:
+         a. fit a stump using the weights w
+         b. err = Σ w_i·[wrong_i] / Σ w_i            (weighted error)
+            stop if err = 0 (perfect) or err >= 1 - 1/K (no better than guessing)
+         c. alpha_m = lr · ( log((1 - err)/err) + log(K - 1) )   (the model's say)
+         d. w_i <- w_i · exp(alpha_m)  for every WRONG sample, then normalise
+            -> misclassified points become heavier for the next stump
+      3. Predict: every stump votes for its class with weight alpha_m;
+         the class with the largest total vote wins.
+
+    Worked example (K=2, lr=1): err = 0.2 -> alpha = log(0.8/0.2) = 1.386, so each
+    misclassified point's weight is multiplied by e^1.386 = 4.
+
+    Attributes: estimators_, estimator_weights_ (alphas), estimator_errors_,
+                sample_weights_ (weights after the last round),
+                weight_history_ (the weights each stump was trained on, for plotting)
+    """
+
+    def __init__(self, n_estimators=50, learning_rate=1.0, max_depth=1):
+        self.n_estimators, self.learning_rate, self.max_depth = n_estimators, learning_rate, max_depth
+
+    def fit(self, X, y):
+        X, y = check_X_y(X, y)
+        self.classes_ = np.unique(y)
+        K = len(self.classes_)
+        w = np.full(len(y), 1 / len(y))                                  # step 1
+        self.estimators_, self.estimator_weights_, self.estimator_errors_ = [], [], []
+        self.weight_history_ = []
+        for m in range(self.n_estimators):
+            self.weight_history_.append(w.copy())
+            stump =DecisionTreeClassifier(max_depth=self.max_depth).fit(X, y, sample_weight=w)  # 2a
+            wrong = stump.predict(X) != y
+            err = np.sum(w * wrong) / np.sum(w)                          # 2b
+            if err <= 0:                     # perfect model: keep it and stop
+                self.estimators_.append(stump)
+                self.estimator_weights_.append(1.0)
+                self.estimator_errors_.append(0.0)
+                break
+            if err >= 1 - 1 / K:             # worse than chance: discard and stop
+                if not self.estimators_:
+                    raise ValueError("the first weak learner is no better than chance")
+                self.weight_history_.pop()   # this round's model was discarded
+                break
+            alpha = self.learning_rate * (np.log((1 - err) / err) + np.log(K - 1))  # 2c
+            self.estimators_.append(stump)
+            self.estimator_weights_.append(alpha)
+            self.estimator_errors_.append(err)
+            w = w * np.exp(alpha * wrong)                                # 2d
+            w = np.maximum(w / w.sum(), np.finfo(float).eps)
+        self.estimator_weights_ = np.array(self.estimator_weights_)
+        self.estimator_errors_ = np.array(self.estimator_errors_)
+        self.sample_weights_ = w
+        return self
+
+    def _votes(self, X, n_models=None):
+        """Weighted votes per class: +alpha for the predicted class, -alpha/(K-1) for the others."""
+        K = len(self.classes_)
+        models = self.estimators_[:n_models]
+        alphas = self.estimator_weights_[:len(models)]
+        V = np.zeros((len(check_X_y(X)), K))
+        for est, a in zip(models, alphas):
+            hit = est.predict(X)[:, None] == self.classes_[None, :]
+            V += np.where(hit, a, -a / (K - 1))
+        return V / alphas.sum()
+
+    def predict_proba(self, X):
+        K = len(self.classes_)
+        # scikit-learn's scale: softmax(votes / (K - 1)); with K = 2 that is softmax(votes)
+        return softmax(self._votes(X) / (K - 1))
+
+    def predict(self, X):
+        return self.classes_[np.argmax(self._votes(X), axis=1)]
+
+    def staged_predict(self, X, n_models):
+        """Prediction using only the first n_models stumps."""
+        return self.classes_[np.argmax(self._votes(X, n_models), axis=1)]
+
+    def staged_score(self, X, y):
+        """Accuracy after 1, 2, ..., M models — shows how boosting improves."""
+        y = np.asarray(y)
+        return np.array([np.mean(self.classes_[np.argmax(self._votes(X, m), 1)] == y)
+                         for m in range(1, len(self.estimators_) + 1)])
+
+
+class GradientBoostingRegressor(_Regressor):
+    """
+    Gradient boosting with squared error.
+
+      1. F0 = mean(y)                                  (start with a constant)
+      2. For m = 1..M:
+         a. residuals  r = y - F                       (what is still unexplained)
+         b. fit a small regression tree h_m to r
+         c. F <- F + lr · h_m(x)                       (take a small step)
+      3. Prediction = F0 + lr · Σ h_m(x)
+
+    Why "gradient": for the loss ½(y - F)², the negative gradient with respect to
+    F is exactly y - F, the residual. Each tree is one gradient-descent step in
+    "function space". A small learning rate + many trees generalises better.
+
+    subsample < 1 gives *stochastic* gradient boosting: each tree sees a random
+    fraction of the rows.
+    """
+
+    def __init__(self, n_estimators=100, learning_rate=0.1, max_depth=3,
+                 min_samples_leaf=1, subsample=1.0, random_state=None):
+        self.n_estimators, self.learning_rate, self.max_depth = n_estimators, learning_rate, max_depth
+        self.min_samples_leaf, self.subsample, self.random_state = min_samples_leaf, subsample, random_state
+
+    def fit(self, X, y):
+        X, y = check_X_y(X, y)
+        y = y.astype(float)
+        rng = np.random.default_rng(self.random_state)
+        self.init_ = y.mean()                                            # step 1
+        F = np.full(len(y), self.init_)
+        self.estimators_, self.train_loss_ = [], []
+        for _ in range(self.n_estimators):
+            r = y - F                                                    # 2a
+            rows = (rng.random(len(y)) < self.subsample) if self.subsample < 1 else slice(None)
+            tree = DecisionTreeRegressor(self.max_depth, min_samples_leaf=self.min_samples_leaf)
+            tree.fit(X[rows], r[rows])                                   # 2b
+            F += self.learning_rate * tree.predict(X)                    # 2c
+            self.estimators_.append(tree)
+            self.train_loss_.append(float(np.mean((y - F) ** 2)))
+        return self
+
+    def staged_predict(self, X):
+        """Yield the prediction after 1, 2, ..., M trees."""
+        F = np.full(len(check_X_y(X)), self.init_)
+        for tree in self.estimators_:
+            F = F + self.learning_rate * tree.predict(X)
+            yield F
+
+    def predict(self, X):
+        F = None
+        for F in self.staged_predict(X):
+            pass
+        return F if F is not None else np.full(len(check_X_y(X)), self.init_)
+
+
+class GradientBoostingClassifier(_Classifier):
+    """
+    Gradient boosting for classification with the log-loss (same algorithm as
+    scikit-learn's GradientBoostingClassifier).
+
+    The model builds raw scores F (log-odds); probabilities come from
+    sigmoid(F) for 2 classes, softmax(F_1..F_K) for K > 2.
+
+    Binary case
+      1. F0 = log( p / (1 - p) ),  p = share of class 1
+      2. For m = 1..M:
+         a. p = sigmoid(F);  residual r = y - p          (negative gradient of log-loss)
+         b. fit a regression tree to r -> it decides the GROUPS (leaves)
+         c. in each leaf set the value with one Newton step:
+                gamma = Σ r / Σ p(1 - p)
+            (plain averages of r would be on the wrong scale for log-odds)
+         d. F <- F + lr · gamma(leaf of x)
+
+    K classes: one tree per class per round, on r_k = [y = k] - p_k, with
+        gamma = (K-1)/K · Σ r / Σ |r|(1 - |r|),   and F0_k = log(prior_k).
+    """
+
+    def __init__(self, n_estimators=100, learning_rate=0.1, max_depth=3,
+                 min_samples_leaf=1, subsample=1.0, random_state=None):
+        self.n_estimators, self.learning_rate, self.max_depth = n_estimators, learning_rate, max_depth
+        self.min_samples_leaf, self.subsample, self.random_state = min_samples_leaf, subsample, random_state
+
+    def fit(self, X, y):
+        X, y = check_X_y(X, y)
+        self.classes_ = np.unique(y)
+        K = len(self.classes_)
+        rng = np.random.default_rng(self.random_state)
+        Y = (y[:, None] == self.classes_[None, :]).astype(float)       # one-hot
+        prior = np.clip(Y.mean(0), 1e-15, 1 - 1e-15)
+        if K == 2:
+            Y = Y[:, 1:]
+            self.init_ = np.log(prior[1:] / (1 - prior[1:]))            # log-odds
+        else:
+            self.init_ = np.log(prior)                                   # log prior
+        F = np.tile(self.init_, (len(y), 1))
+        self.estimators_ = []
+        for _ in range(self.n_estimators):
+            P = self._link(F)
+            rows = (rng.random(len(y)) < self.subsample) if self.subsample < 1 else np.ones(len(y), bool)
+            stage = []
+            for k in range(Y.shape[1]):
+                r = Y[:, k] - P[:, k]                                    # residuals
+                tree = DecisionTreeRegressor(self.max_depth, min_samples_leaf=self.min_samples_leaf)
+                tree.fit(X[rows], r[rows])
+                leaf = tree.apply(X)
+                for leaf_id, node in enumerate(tree.leaves_):          # Newton step per leaf
+                    in_leaf = (leaf == leaf_id) & rows
+                    num = r[in_leaf].sum()
+                    if K == 2:
+                        den = np.sum(P[in_leaf, 0] * (1 - P[in_leaf, 0]))
+                    else:
+                        num *= (K - 1) / K
+                        den = np.sum(np.abs(r[in_leaf]) * (1 - np.abs(r[in_leaf])))
+                    node.value = num / den if abs(den) > 1e-150 else 0.0
+                F[:, k] += self.learning_rate * tree.predict(X)
+                stage.append(tree)
+            self.estimators_.append(stage)
+        return self
+
+    @staticmethod
+    def _link(F):
+        return sigmoid(F) if F.shape[1] == 1 else softmax(F)
+
+    def _raw(self, X, n_stages=None):
+        X = check_X_y(X)
+        F = np.tile(self.init_, (len(X), 1))
+        for stage in self.estimators_[:n_stages]:
+            for k, tree in enumerate(stage):
+                F[:, k] += self.learning_rate * tree.predict(X)
+        return F
+
+    def decision_function(self, X):
+        F = self._raw(X)
+        return F[:, 0] if F.shape[1] == 1 else F
+
+    def predict_proba(self, X, n_stages=None):
+        P = self._link(self._raw(X, n_stages))
+        return np.c_[1 - P, P] if P.shape[1] == 1 else P
+
+    def predict(self, X):
+        return self.classes_[np.argmax(self.predict_proba(X), axis=1)]
+
+    def staged_score(self, X, y):
+        """Accuracy after 1, 2, ..., M rounds (computed incrementally)."""
+        X, y = check_X_y(X), np.asarray(y)
+        F = np.tile(self.init_, (len(X), 1))
+        scores = []
+        for stage in self.estimators_:
+            for k, tree in enumerate(stage):
+                F[:, k] += self.learning_rate * tree.predict(X)
+            P = self._link(F)
+            P = np.c_[1 - P, P] if P.shape[1] == 1 else P
+            scores.append(np.mean(self.classes_[np.argmax(P, 1)] == y))
+        return np.array(scores)
 
 
 # ===========================================================================

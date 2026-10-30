@@ -15,7 +15,7 @@ st.markdown(
 
 SECTIONS = [
     ("pages/1_🧠_Models.py", "🧠", "Models",
-     "Train a model on toy data and watch its decision boundary — from the perceptron to decision trees."),
+     "Train a model on toy data and watch its decision boundary — from the perceptron to boosting."),
     ("pages/2_⚖️_Imbalanced_learning.py", "⚖️", "Imbalanced learning",
      "See SMOTE & co. add or remove points, and whether it actually helps a classifier."),
     ("pages/3_🧪_Statistical_tests.py", "🧪", "Statistical tests",

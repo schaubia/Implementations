@@ -34,7 +34,7 @@ print(r, r.details, r.conclusion(alpha=0.05))
 
 | Module | Contents |
 |---|---|
-| `statlab.models` | Perceptron, LinearRegression, RidgeRegression, LogisticRegression (binary + softmax), KNeighborsClassifier/Regressor, GaussianNB, DecisionTreeClassifier (Gini/entropy), StandardScaler, PCA |
+| `statlab.models` | Perceptron, LinearRegression, RidgeRegression, LogisticRegression (binary + softmax), KNeighborsClassifier/Regressor, GaussianNB, DecisionTreeClassifier (Gini/entropy, sample weights), DecisionTreeRegressor, AdaBoostClassifier (SAMME), GradientBoostingRegressor, GradientBoostingClassifier, StandardScaler, PCA |
 | `statlab.imbalance` | RandomOverSampler, SMOTE, BorderlineSMOTE (1 & 2), ADASYN, RandomUnderSampler, TomekLinks, EditedNearestNeighbours, NearMiss (1, 2, 3), ClusterCentroids, SMOTETomek, SMOTEENN — same `fit_resample` API and `sampling_strategy` semantics as imbalanced-learn |
 | `statlab.stats` | describe, t-tests (one-sample, Student, Welch, paired), z-tests, ANOVA + Tukey HSD, χ² goodness-of-fit / independence, Fisher exact, Mann-Whitney U, Wilcoxon, Kruskal-Wallis, KS, Pearson/Spearman, CIs (mean, difference, proportion Wald/Wilson), Cohen's d, Hedges' g, η², Cramér's V, power & sample size, Bonferroni/Holm/BH |
 | `statlab.metrics` | confusion matrix, accuracy, precision, recall, specificity, F-beta, balanced accuracy, MCC, G-mean, ROC/PR curves, AUC, AP, log loss, Brier, MSE/RMSE/MAE/R² |
@@ -51,7 +51,7 @@ whatever you are looking at.
 
 ```bash
 pip install pytest scikit-learn imbalanced-learn
-python -m pytest tests -q        # 30 passed
+python -m pytest tests -q        # 35 passed
 ```
 
 - Metrics, linear/ridge, Gaussian NB, PCA, KFold, all statistical tests: match to floating-point precision.
@@ -59,6 +59,8 @@ python -m pytest tests -q        # 30 passed
 - Random samplers (SMOTE, ADASYN, …): same class counts; synthetic points verified to lie on segments
   between minority points. Exact points differ because the random-number streams differ.
 - Logistic regression (gradient descent) matches sklearn's unpenalised solution to ~1e-2.
+- Decision trees (incl. weighted), AdaBoost and gradient boosting: same predictions and probabilities as
+  scikit-learn (differences only when several splits are exactly equally good — sklearn picks one at random).
 
 ## Notes / limitations
 

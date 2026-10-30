@@ -331,3 +331,54 @@ def test_sample_size_fast_and_correct():
     n = S.sample_size_ttest_ind(0.05, 0.99)
     assert S.power_ttest_ind(0.05, n) >= 0.99 > S.power_ttest_ind(0.05, n - 1)
     assert time.time() - t < 2
+
+
+# ---------------------------------------------------------------- boosting
+from sklearn import ensemble  # noqa: E402
+from sklearn.datasets import load_breast_cancer, load_wine, load_diabetes  # noqa: E402
+
+
+def test_weighted_tree_matches_sklearn():
+    X, y = load_breast_cancer(return_X_y=True)
+    w = rng.uniform(0.1, 3, len(y))
+    for d in (1, 3):
+        a = ML.DecisionTreeClassifier(max_depth=d).fit(X, y, sample_weight=w)
+        b = tree.DecisionTreeClassifier(max_depth=d, random_state=0).fit(X, y, sample_weight=w)
+        assert np.allclose(a.predict_proba(X), b.predict_proba(X))
+
+
+def test_regression_tree_matches_sklearn():
+    X, y = load_diabetes(return_X_y=True)
+    for d in (2, 4, None):
+        a = ML.DecisionTreeRegressor(d).fit(X, y)
+        b = tree.DecisionTreeRegressor(max_depth=d, random_state=0).fit(X, y)
+        assert np.allclose(a.predict(X), b.predict(X))
+
+
+def test_adaboost_matches_sklearn():
+    for X, y in [load_breast_cancer(return_X_y=True), load_wine(return_X_y=True)]:
+        for lr in (1.0, 0.5):
+            a = ML.AdaBoostClassifier(50, lr).fit(X, y)
+            b = ensemble.AdaBoostClassifier(n_estimators=50, learning_rate=lr, random_state=0).fit(X, y)
+            assert np.allclose(a.estimator_weights_, b.estimator_weights_[:len(a.estimator_weights_)])
+            assert np.allclose(a.predict_proba(X), b.predict_proba(X))
+
+
+def test_gradient_boosting_matches_sklearn():
+    X, y = load_diabetes(return_X_y=True)
+    a = ML.GradientBoostingRegressor(100, 0.1, 3).fit(X, y)
+    b = ensemble.GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=3,
+                                           random_state=0).fit(X, y)
+    assert np.allclose(a.predict(X), b.predict(X))
+    for X, y in [load_breast_cancer(return_X_y=True), load_iris(return_X_y=True)]:
+        a = ML.GradientBoostingClassifier(50, 0.1, 3).fit(X, y)
+        b = ensemble.GradientBoostingClassifier(n_estimators=50, learning_rate=0.1, max_depth=3,
+                                                random_state=0).fit(X, y)
+        assert np.allclose(a.predict_proba(X), b.predict_proba(X), atol=1e-8)
+
+
+def test_boosting_staged_scores_improve():
+    X, y = make_classification(300, 2, n_redundant=0, n_clusters_per_class=2, random_state=5)
+    for m in (ML.AdaBoostClassifier(60), ML.GradientBoostingClassifier(60)):
+        s = m.fit(X, y).staged_score(X, y)
+        assert len(s) > 1 and s[-1] >= s[0] and np.isclose(s[-1], m.score(X, y))
