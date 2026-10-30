@@ -8,11 +8,12 @@ from statlab.models import LogisticRegression, DecisionTreeClassifier
 st.set_page_config(page_title="Metrics · StatLab", page_icon="📏", layout="wide")
 st.title("📏 Metrics & validation")
 
-tab1, tab2, tab3, tab4 = st.tabs(["Confusion matrix & scores", "ROC / PR curves",
-                                  "Cross-validation", "Bootstrap"])
+c = st.sidebar
+section = c.selectbox("Topic", ["Confusion matrix & scores", "ROC / PR curves",
+                               "Cross-validation", "Bootstrap"])
 
 # ---------------------------------------------------------------------------
-with tab1:
+if section == "Confusion matrix & scores":
     st.caption("Set the four cells of a binary confusion matrix and see every score update.")
     c = st.columns(4)
     tp = c[0].number_input("TP", 0, 10_000, 40)
@@ -41,9 +42,9 @@ with tab1:
         show_source(f)
 
 # ---------------------------------------------------------------------------
-with tab2:
-    sep = st.slider("Class separation", 0.0, 4.0, 1.5)
-    n = st.slider("Samples ", 50, 2000, 400)
+elif section == "ROC / PR curves":
+    sep = c.slider("Class separation", 0.0, 4.0, 1.5)
+    n = c.slider("Samples", 50, 2000, 400)
     rng = np.random.default_rng(0)
     y = (rng.random(n) < 0.3).astype(int)
     score = rng.normal(0, 1, n) + sep * y
@@ -67,9 +68,9 @@ with tab2:
     show_source(M.average_precision_score)
 
 # ---------------------------------------------------------------------------
-with tab3:
-    k = st.slider("Folds (k)", 2, 10, 5)
-    strat = st.checkbox("Stratified", True)
+elif section == "Cross-validation":
+    k = c.slider("Folds (k)", 2, 10, 5)
+    strat = c.checkbox("Stratified", True)
     X, y = datasets.make_imbalanced(200, 0.15, 1.0)
     cv = V.StratifiedKFold(k, shuffle=True, random_state=0) if strat else V.KFold(k, shuffle=True, random_state=0)
     # visualise which samples are in each test fold
@@ -97,10 +98,10 @@ with tab3:
     show_source(V.cross_val_score)
 
 # ---------------------------------------------------------------------------
-with tab4:
-    stat_name = st.radio("Statistic", ["mean", "median", "std"], horizontal=True)
+elif section == "Bootstrap":
+    stat_name = c.radio("Statistic", ["mean", "median", "std"])
     rng = np.random.default_rng(1)
-    data = rng.lognormal(0, 0.6, st.slider("Sample size", 10, 500, 40))
+    data = rng.lognormal(0, 0.6, c.slider("Sample size", 10, 500, 40))
     fn = {"mean": np.mean, "median": np.median, "std": lambda a: np.std(a, ddof=1)}[stat_name]
     b = V.bootstrap(fn, data, 3000, 0.95, random_state=0)
     fig, ax = fig_ax(6, 3)
