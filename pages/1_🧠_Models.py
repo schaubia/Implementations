@@ -61,7 +61,10 @@ if MODEL == "PCA":
 
 # ------------------------------------------------------------------ classifiers
 c = st.sidebar
-data = c.selectbox("Dataset", ["Two blobs", "Moons", "Three blobs"])
+DATASETS = ["Two blobs", "Moons", "Three blobs"]
+if MODEL == "Perceptron":            # binary model -> only two-class datasets
+    DATASETS = DATASETS[:2]
+data = c.selectbox("Dataset", DATASETS)
 n = c.slider("Samples", 40, 600, 200)
 noise = c.slider("Noise / spread", 0.1, 2.5, 0.8 if data != "Moons" else 0.25)
 if data == "Two blobs":
@@ -72,10 +75,7 @@ else:
     X, y = datasets.make_blobs(n, centers=((-2, -1), (2, -1), (0, 2.5)), std=noise)
 
 if MODEL == "Perceptron":
-    if len(np.unique(y)) > 2:
-        st.warning("The perceptron here is binary — pick a two-class dataset.")
-        st.stop()
-    lr = c.slider("Learning rate", 0.01, 2.0, 1.0)
+    lr =c.slider("Learning rate", 0.01, 2.0, 1.0)
     epochs = c.slider("Max epochs", 1, 200, 50)
     model = ML.Perceptron(lr=lr, n_epochs=epochs)
 elif MODEL == "Logistic regression":
